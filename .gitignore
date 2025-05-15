@@ -1,1 +1,4 @@
 models/
+bak/
+training_logs/
+.vscode/
