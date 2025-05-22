@@ -11,6 +11,10 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from torch.distributions import Categorical
 
+# 设置设备 - 检测CUDA是否可用
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"使用设备: {device}")
+
 # 训练监控器类
 class TrainingMonitor:
     """训练监控器：记录和可视化PPO训练过程"""
@@ -252,11 +256,10 @@ class env(Environment):
 
     def getstat(self):
         s = self.creatures[0].getstat(False, pk=0.023, vk=0.028, ak=0.001, mk=0.05)
-        # 使用clone().detach()代替torch.tensor()
         if isinstance(s, torch.Tensor):
-            return s.clone().detach().to(dtype=torch.float32)
+            return s.clone().detach().to(device=device, dtype=torch.float32)
         else:
-            return torch.tensor(s, dtype=torch.float32)
+            return torch.tensor(s, dtype=torch.float32, device=device)  
 
     def act(self, a):
         self.creatures[0].actdisp(a)
@@ -289,10 +292,19 @@ class env(Environment):
         
         # 计算当前质心 x 坐标
         pos = sum(p.p[0] for p in self.creatures[0].phys) / len(self.creatures[0].phys)
+        
+        # 计算当前平均高度 (相对于地面)
+        avg_height = sum(p.p[1] for p in self.creatures[0].phys) / len(self.creatures[0].phys)
+        # 高度奖励 = 平均高度 * 系数
+        height_reward = max(0, avg_height - self.ground) * 0.3
+        
         # 向右移动增量
         delta = pos - self.last_pos
-        # 奖励 = 向右移动量（可以乘以系数放大）
-        self.r = delta * 2.0
+        # 移动奖励 = 向右移动量（可以乘以系数放大）
+        move_reward = delta * 2.0
+        
+        # 结合两种奖励
+        self.r = move_reward + height_reward
         
         # 对self.r进行标准化，确保在[0, 1]范围内
         self.r = 1.0 / (1.0 + math.exp(-self.r))
@@ -548,7 +560,13 @@ def ppo_update(policy_net, value_net, optimizer_p, optimizer_v,
     flat_actions = [a for acts in actions for a in acts if a is not None]
     flat_log_probs = torch.cat([lp for lp in old_log_probs if lp is not None], dim=0)
     
-    dataset = TensorDataset(flat_states, flat_actions, flat_log_probs, advantages, returns)
+    # 确保数据在正确设备上
+    advantages = advantages.to(device)
+    returns = returns.to(device)
+    flat_states = flat_states.to(device)
+    flat_log_probs = flat_log_probs.to(device)
+    
+    dataset = TensorDataset(flat_states, torch.tensor(flat_actions, device=device), flat_log_probs, advantages, returns)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
     # 多次更新
@@ -696,9 +714,9 @@ def train(m, mv, memo, n=200, times=1, discount=0.99, lamb=0.95, ek=0.5, eps=0.2
         returns.reverse()  # 因为是从后往前计算，所以需要反转列表
         
         # 计算优势标准化
-        adv_tensor = torch.tensor(ad, dtype=torch.float32)
+        adv_tensor = torch.tensor(ad, dtype=torch.float32, device=device)
         adv_normalized = (adv_tensor - adv_tensor.mean()) / (adv_tensor.std() + 1e-8)
-        returns_tensor = torch.tensor(returns, dtype=torch.float32)  # 转换为张量
+        returns_tensor = torch.tensor(returns, dtype=torch.float32, device=device)  # 转换为张量
         
         # 对每个时间步的经验进行批量更新
         for batch_start in range(0, len(exp), 32):
@@ -724,7 +742,8 @@ def train(m, mv, memo, n=200, times=1, discount=0.99, lamb=0.95, ek=0.5, eps=0.2
             pc = torch.cat(pc_list)
             ent = entropy(out)
             v = mv(batch_states)
-            old_probs = torch.tensor([prob for probs in batch_probs for prob in probs], dtype=torch.float32)
+            old_probs = torch.tensor([prob for probs in batch_probs for prob in probs], 
+                            dtype=torch.float32, device=device)
             ratio = torch.exp(torch.log(pc) - torch.log(old_probs))  # 现在old_probs已定义
             # 获取每个样本的肌肉数量
             muscles_per_sample = len(batch_actions[0])
@@ -779,7 +798,7 @@ def train(m, mv, memo, n=200, times=1, discount=0.99, lamb=0.95, ek=0.5, eps=0.2
 if __name__ == "__main__":
     # 全局设置
     evnname = "box1"
-    lastname = "-deep-optimized-v6"
+    lastname = "-deep-optimized-v7"
     e = env()
     statnum = len(e.getstat())
     musclenum = sum([len(i.muscles) for i in e.creatures])
@@ -791,15 +810,15 @@ if __name__ == "__main__":
     
     if savename in os.listdir():
         print(f"加载模型: {best_model_name}")
-        checkpoint = torch.load(best_model_name)
-        m = model()
-        mv = modelv()
+        checkpoint = torch.load(best_model_name, map_location=device)
+        m = model().to(device)
+        mv = modelv().to(device)
         m.load_state_dict(checkpoint['model_state_dict'])
         mv.load_state_dict(checkpoint['modelv_state_dict'])
     else:
         print("创建新模型")
-        m = model()
-        mv = modelv()
+        m = model().to(device)
+        mv = modelv().to(device)
     
     memo = memory(24)  # 增大记忆容量
     n = 5000  # 一轮训练的最大回合数

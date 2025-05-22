@@ -315,7 +315,7 @@ class Phy:
         return cls.xianxing(cls.reference(pos, c), x)
     
     @classmethod
-    def tplay(cls, fps=1, a=False, v=False, c=None, x=None, 
+    def tplay(cls, fps=2, a=False, v=False, c=None, x=None,
               azoom=1, vzoom=1, k=None) -> None:
         """使用turtle显示物理模型"""
         # 透视变换函数
